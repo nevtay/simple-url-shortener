@@ -1,35 +1,105 @@
-## Architecture
+## Prerequisites
 
+- [Node.js](https://nodejs.org/) v18 or later
+- [PostgreSQL](https://www.postgresql.org/) v13 or later, running and reachable
+- npm (installed alongside Node.js)
+
+## Installation
+
+1. Clone the repo and install dependencies:
+
+   ```bash
+   git clone <repo-url>
+   cd simple-url-shortener
+   npm install
+   ```
+
+2. Create a database in Postgres for the app, e.g.:
+
+   ```bash
+   createdb simpleUrlShortener
+   ```
+
+3. Create a `.env` file in the project root with your database connection string and (optionally) a port:
+
+   ```
+   DATABASE_URL=postgresql://<user>:<password>@localhost:5432/simpleUrlShortener
+   PORT=3000
+   ```
+
+4. Run the migrations to create the `links` table:
+
+   ```bash
+   npm run migrate
+   ```
+
+## Usage
+
+Start the server:
+
+```bash
+npm start
 ```
-Client → Express API → Postgres
+
+Or, for auto-restart on file changes during development:
+
+```bash
+npm run dev
 ```
 
-### Design Decisions
+By default the server runs on `http://localhost:3000` (or the `PORT` set in `.env`).
 
-**Connection pooling**
+**Shorten a URL**
 
-- We use a pool instead of a single client to avoid opening a new connection, running the query, and closing it for every incoming request (i.e. `new Client()`)
-- A `Pool` opens a small number of connections once, keeps them running, and distributes available ones to queries as needed
-- This keeps latency low because we don't have to deal with processes such as TCP handshakes and authentication as part of the process of establishing individual connections
-- Postgres also has a hard cap on how many connections it can handle at a given time
+```bash
+curl -X POST http://localhost:3000/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"longUrl": "https://example.com/some/long/path"}'
+```
 
-- TLDR: pooling reuses a fixed set of DB connections across concurrent requests, avoiding the overhead and connection-limit risk of opening one per request
+Response:
 
-**Collision-safe short codes**
+```json
+{
+  "shortUrl": "http://localhost:3000/AbCdEfG",
+  "shortCode": "AbCdEfG",
+  "longUrl": "https://example.com/some/long/path",
+  "createdAt": "2026-01-01T00:00:00.000Z"
+}
+```
 
-- Each `short_code` is randomly generated using nanoid, which provides a URL-safe character set (alphanumeric characters, "-", and "\_"). At a length of 7 and 64 possible characters per position, we get 4.4 trillion possibilities (64^7)
-- `short_code` is the value used to look up a link on every redirect (`WHERE short_code = $1`). If two rows shared the same code, a redirect would have no way to know which `long_url` to send the visitor to
-- Hence the `UNIQUE` constraint, which allows the DB to enforce non-colliding values
-- A retry flow is also implemented as a collision means the code was unlucky, not because of a bad request. If a user's `longUrl` is fine, then retrying with a fresh code costs nothing and should succeed on the next attempt
+**Visit a short URL**
 
-**302 vs 301 redirects**
+Visiting the returned `shortUrl` in a browser (or via `curl -L`) redirects to the original `longUrl` and increments its click count.
 
-- 302 is temporary, and tells the browser/CDN "this redirect might change later" — so it asks your server again next time instead of caching the destination
-- 301 is permanent, so browsers cache it aggressively (sometimes forever). If a `short_code` is given a new `long_url`, cached clients would keep going to the old one
-- `long_url` isn't immutable in the current schema, so 302 gives the freedom to update without breaking existing links
-- 302 also allows `click_count` to track properly as every redirect hits the server, while a cached 301 would skip our server and throw off the numbers tracked by `click_count`
+```bash
+curl -L http://localhost:3000/AbCdEfG
+```
 
-**Atomic click tracking**
+**Health check**
 
-- Instead of a `SELECT` + `UPDATE` query, we use a single `UPDATE ... RETURNING` statement to reduce the trips to Postgres from two to one, which reduces latency per redirect
-- Two separate queries run the risk of another query modifying the row between the `SELECT` and `UPDATE` queries, but a single query keeps that possibility at bay
+```bash
+curl http://localhost:3000/health
+```
+
+### Using Postman
+
+1. Open Postman and create a new request.
+2. **Shorten a URL:**
+   - Method: `POST`
+   - URL: `http://localhost:3000/shorten`
+   - Body tab → select `raw` → change the type dropdown from `Text` to `JSON`
+   - Enter:
+     ```json
+     {
+       "longUrl": "https://example.com/some/long/path"
+     }
+     ```
+   - Hit **Send**. You should get a `201 Created` response with `shortUrl`, `shortCode`, `longUrl`, and `createdAt`.
+3. **Visit a short URL:**
+   - Create a new request with method `GET` and URL set to the `shortUrl` from the previous response (e.g. `http://localhost:3000/AbCdEfG`).
+   - By default Postman follows redirects automatically, so **Send** will land you on `longUrl`. To inspect the raw `302` instead, open the request's **Settings** and turn off "Automatically follow redirects", then check the response headers for `Location`.
+4. **Health check:**
+   - Method: `GET`, URL: `http://localhost:3000/health`.
+
+Tip: save these as a Postman Collection with a `baseUrl` variable (e.g. `{{baseUrl}}/shorten`) so you can switch between local and deployed environments without editing each request.
